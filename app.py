@@ -1,61 +1,307 @@
-from flask import Flask,render_template,request
+from flask import Flask, render_template, request
+import os
 import boto3
 import pymysql
+from werkzeug.utils import secure_filename
+from datetime import datetime
+
+
+# ============================================================
+# FLASK APPLICATION
+# ============================================================
 
 app = Flask(__name__)
 
-bucket_name="student-photo-demo-gopu"
 
-db=pymysql.connect(
-host="100.57.165.48",
-port="3306",
-user="admin",
-password="Admin123",
-database="studentdb"
+# ============================================================
+# AWS CONFIGURATION
+# ============================================================
+
+S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME")
+
+AWS_REGION = os.environ.get(
+    "AWS_REGION",
+    "ap-south-1"
 )
 
-@app.route('/')
+
+# ============================================================
+# RDS MYSQL CONFIGURATION
+# ============================================================
+
+DB_HOST = os.environ.get("DB_HOST")
+DB_USER = os.environ.get("DB_USER")
+DB_PASSWORD = os.environ.get("DB_PASSWORD")
+DB_NAME = os.environ.get(
+    "DB_NAME",
+    "campus_maintenance"
+)
+
+
+# ============================================================
+# S3 CLIENT
+# ============================================================
+
+s3_client = boto3.client(
+    "s3",
+    region_name=AWS_REGION
+)
+
+
+# ============================================================
+# DATABASE CONNECTION
+# ============================================================
+
+def get_db_connection():
+
+    connection = pymysql.connect(
+        host=DB_HOST,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+        cursorclass=pymysql.cursors.DictCursor
+    )
+
+    return connection
+
+
+# ============================================================
+# CREATE DATABASE TABLE
+# ============================================================
+
+def create_table():
+
+    connection = get_db_connection()
+
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS maintenance_requests (
+
+            id INT AUTO_INCREMENT PRIMARY KEY,
+
+            name VARCHAR(100) NOT NULL,
+
+            email VARCHAR(150) NOT NULL,
+
+            location VARCHAR(200) NOT NULL,
+
+            category VARCHAR(100) NOT NULL,
+
+            description TEXT NOT NULL,
+
+            photo_key VARCHAR(500),
+
+            status VARCHAR(50) DEFAULT 'Pending',
+
+            created_at DATETIME NOT NULL
+
+        )
+    """)
+
+    connection.commit()
+
+    cursor.close()
+
+    connection.close()
+
+
+# ============================================================
+# HOME PAGE
+# ============================================================
+
+@app.route("/")
 def home():
-    return render_template('index.html')
 
-@app.route('/register',methods=['POST'])
-def register():
+    return render_template("index.html")
 
-    name=request.form['name']
-    email=request.form['email']
-    course=request.form['course']
 
-    photo=request.files['photo']
+# ============================================================
+# SUBMIT MAINTENANCE REQUEST
+# ============================================================
 
-    s3=boto3.client('s3')
+@app.route("/submit", methods=["POST"])
+def submit_request():
 
-    s3.upload_fileobj(
-        photo,
-        bucket_name,
-        photo.filename
-    )
+    try:
 
-    photo_url=f"https://{bucket_name}.s3.amazonaws.com/{photo.filename}"
+        # ----------------------------------------------------
+        # GET FORM DATA
+        # ----------------------------------------------------
 
-    cursor=db.cursor()
+        name = request.form.get(
+            "name",
+            ""
+        ).strip()
 
-    sql="""
-    INSERT INTO students
-    (name,email,course,photo_url)
-    VALUES(%s,%s,%s,%s)
-    """
+        email = request.form.get(
+            "email",
+            ""
+        ).strip()
 
-    cursor.execute(
-        sql,
-        (name,email,course,photo_url)
-    )
+        location = request.form.get(
+            "location",
+            ""
+        ).strip()
 
-    db.commit()
+        category = request.form.get(
+            "category",
+            ""
+        ).strip()
 
-    return "Student Registered Successfully"
+        description = request.form.get(
+            "description",
+            ""
+        ).strip()
 
-if __name__=="__main__":
+
+        # ----------------------------------------------------
+        # VALIDATE FORM
+        # ----------------------------------------------------
+
+        if not name or not email or not location or not category or not description:
+
+            return render_template(
+                "index.html",
+                error="Please fill in all required fields."
+            )
+
+
+        # ----------------------------------------------------
+        # UPLOAD PHOTO TO S3
+        # ----------------------------------------------------
+
+        photo = request.files.get("photo")
+
+        photo_key = ""
+
+
+        if photo and photo.filename:
+
+            safe_filename = secure_filename(
+                photo.filename
+            )
+
+            timestamp = datetime.now().strftime(
+                "%Y%m%d%H%M%S"
+            )
+
+            photo_key = (
+                "maintenance/"
+                + timestamp
+                + "_"
+                + safe_filename
+            )
+
+
+            s3_client.upload_fileobj(
+
+                photo,
+
+                S3_BUCKET_NAME,
+
+                photo_key,
+
+                ExtraArgs={
+                    "ContentType": photo.content_type
+                }
+
+            )
+
+
+        # ----------------------------------------------------
+        # SAVE DATA TO RDS MYSQL
+        # ----------------------------------------------------
+
+        connection = get_db_connection()
+
+        cursor = connection.cursor()
+
+
+        cursor.execute("""
+            INSERT INTO maintenance_requests
+            (
+                name,
+                email,
+                location,
+                category,
+                description,
+                photo_key,
+                status,
+                created_at
+            )
+
+            VALUES
+            (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
+        """, (
+
+            name,
+
+            email,
+
+            location,
+
+            category,
+
+            description,
+
+            photo_key,
+
+            "Pending",
+
+            datetime.now()
+
+        ))
+
+
+        connection.commit()
+
+        cursor.close()
+
+        connection.close()
+
+
+        # ----------------------------------------------------
+        # SUCCESS
+        # ----------------------------------------------------
+
+        return render_template(
+            "index.html",
+            message="Maintenance request submitted successfully!"
+        )
+
+
+    except Exception as error:
+
+        print(
+            "ERROR:",
+            error
+        )
+
+
+        return render_template(
+            "index.html",
+            error="Something went wrong. Please try again."
+        )
+
+
+# ============================================================
+# APPLICATION START
+# ============================================================
+
+if __name__ == "__main__":
+
     app.run(
         host="0.0.0.0",
-        port=5000
+        port=5000,
+        debug=True
     )
